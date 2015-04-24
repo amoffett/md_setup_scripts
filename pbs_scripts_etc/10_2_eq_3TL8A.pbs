@@ -1,0 +1,14 @@
+#!/bin/bash
+#
+#PBS -l walltime=05:00:00
+#PBS -l nodes=1:ppn=12
+#PBS -N eq_A
+#PBS -q cse
+#
+# End of embedded QSUB options
+#
+
+cd /home/amoffet2/BAK1/GSH/GSH_408/equilibration/
+
+mpiexec pmemd.MPI -O -p ../3TL8A_ATP_10_GSH_408.prmtop -c /home/amoffet2/scratch/output/eq_3TL8A_ATP_10_GSH_408.rst -i eq_2.in -o /home/amoffet2/scratch/output/eq_2_3TL8A_ATP_10_GSH_408.out -x /home/amoffet2/scratch/output/eq_2_3TL8A_ATP_10_GSH_408.mdcrd -r /home/amoffet2/scratch/output/eq_2_3TL8A_ATP_10_GSH_408.rst
+
