@@ -1,151 +1,247 @@
-#!/bin/bash/
-#
-# Script to set up runs on Blue Waters for X hours using pmemd (a ~40,000 atom system	
-# gets ~40ns running pmemd.cuda on a single GPU).
-# In the base directory, it creates a directory for each system, and makes PBS files
-# for each replicate system and each consecutive run of each replicate.
-# Bash scripts are created in a separate directory, one for each day's worth of
-# submissions across all systems and replicates. 
-#
-# The base directory for n systems with y replicates for each system 
-# running for x runs will then look like this:
-#
-#	   		       	     |--|submit_scripts/ -- submit_day1,... submit_dayx
-#	   		       	     |
-# basedir/ --|SIMULATION_SET_NAME/ --|--|SYSTEM1/ -- SYSTEM1.prmtop, SYSTEM1.in, SYSTEM1_1_1.pbs, ...SYSTEM1_x_y.pbs   
-#	   	                     |
-#	   		             |--|SYSTEM2/ -- SYSTEM2.prmtop, SYSTEM2.in, SYSTEM2_1_1.pbs, ...SYSTEM2_x_y.pbs
-#	   		             ...
-#	   		             |--|SYSTEMn/ -- SYSTEMn.prmtop, SYSTEMn.in, SYSTEMn_1_1.pbs, ...SYSTEMn_x_y.pbs
-#
-##########################################################################################
-# **IMPORTANT: Assumes you have put prmtop files in your base directory ($basedir) named #
-# "${sysnames[$sys]}_${prmname}.prmtop" for each system, and have already run            #
-# minimization with the restart files named						 #
-# "${name}_min_${sysnames[$sys]}_${prmname}.rst" in the scratch output directory         #
-# ($outdir).          									 #
-# For example:										 #
-#  minimization restart: /u/sciteam/moffett/scratch/output/AMD_min_3UIM_ATP.rst 	 #
-#  prmtop file: /u/sciteam/moffett/BAK1_aMD/initial_aMD/3UIM_ATP.prmtop 		 #
-##########################################################################################
-#
-# Use GPU
-GPU=1
+#!/bin/bash
 
-# Use MPI 
-MPI=0
+TYPE="xk"
+NNODE=1
+ALLO="jt3"
+QUE="low"
+REPS=1
+ROUND=1
+STRUC=0
+INPUT=0
+OUTPUT=0
+WT="23:30:00"
+SEP=False
 
-# Number of processors to use per node (each node has one GPU)
-procs=1
+usage() { echo "
+        Usage: $0
+        
+        This script will take the location of AMBER inpcrd/rst and prmtop files to be used as starting
+        files as an input and produce PBS scripts to run production simulations on Blue Waters. Run
+        out of an empty simulation directory. All paths required as input should be absolute paths. 
+        Corresponding inpcrd/rst and prmtop files should have the same name preceding the extension and
+        only files to be used for this setup should be included in the structure/topology directory.
+        
+        To use this script, in short:
+                1) Make a new directory to run simulations out of and enter that directory.
+                2) Use bwsub in that directory with all the required options and any other optional flags.
+                3) Go to the submit_scripts directory and enter \"bash round_1_submit.sh\".
+                4) This should submit the first round of jobs, and once the first round is done, do the
+                same thing for \"round_2_submit.sh\", and so on.
 
-# Number of nodes to use
-node=1
+        [To make a directory in the simulation directory, just use \$(pwd)/<NAME>] 
 
-# BW allocation code
-project=jt3
+        -o string (full path to output directory to be created) REQUIRED 
+        -c Boolean (create seperate subdirectories for each system within the output directory?) [Default: False]
+        -i string (full path to AMBER input file) REQUIRED 
+        -s string (full path to structure and topology directory) REQUIRED
+        -t "xe" or "xk" (node type) [Default: "xk"]
+        -n integer (number of nodes to use) [Default: 1] 
+        -a three letter string (Blue Waters allocation name) [Default: "jt3"] 
+        -q "low" or "normal" or "high" (queue priority to use) [Default: "low"]
+        -r integer (number of replicates to produce for each starting structure) [Default: 1] 
+        -d integer (number of rounds of MD to set up) [Default: 1]
+        -w three sets of two integers separated by colons (walltime) [Default: "23:30:30"]
+        " 1>&2; exit 1; }
 
-# Walltime for each job
-time="24:00:00"
+while getopts ":s:c:i:o:t:n:a:q:r:d:w:h" opt; do
+        case "${opt}" in
+                s)
+                        if [[ $OPTARG =~ ^[^[:space:]]*$ && $OPTARG =~ ^[/]{1}.*$ ]]; then
+                                STRUC=$OPTARG
+                        else
+                                echo "-s requires an argument and must specify a full path"
+                                usage
+                                exit 1
+                        fi
+                        ;;
+                c)
+                        if [[ $OPTARG == True || $OPTARG == False ]]; then
+                                SEP=$OPTARG
+                        else
+                                usage
+                                exit 1
+                        fi
+                        ;;
+                i)
+                        if [[ $OPTARG =~ ^[^[:space:]]*$ && $OPTARG =~ ^[/]{1}.*$ ]]; then
+                                INPUT=$OPTARG
+                        else
+                                echo "-i requires an argument and must specify a full path"
+                                usage
+                                exit 1
+                        fi
+                        ;;
+                o)
+                        if [[ $OPTARG =~ ^[^[:space:]]*$ && $OPTARG =~ ^[/]{1}.*$ ]]; then
+                                OUTPUT=$OPTARG
+                        else
+                                echo "-o requires an argument and must specify a full path"
+                                usage
+                                exit 1
+                        fi
+                        ;;
+                t)
+                        if [[ $OPTARG == "xe" || $OPTARG == "xk" ]]; then
+                                TYPE=$OPTARG
+                        else
+                                usage
+                                exit 1
+                        fi
+                        ;;
+                n)
+                        if [[ $OPTARG =~ ^[0-9]+$ && $OPTARG -gt 0 ]]; then
+                                NNODE=$OPTARG
+                        else
+                                usage
+                                exit 1
+                        fi
+                        ;;
+                a)
+                        if [[ $OPTARG =~ ^[[:alnum:]_]{3}$ ]]; then
+                                ALLO=$OPTARG
+                        else
+                                usage
+                                exit 1
+                        fi
+                        ;;
+                q)
+                        if [[ $OPTARG == "low" || $OPTARG == "normal" || $OPTARG == "high" ]]; then
+                                QUE=$OPTARG
+                        else
+                                usage
+                                exit 1
+                        fi
+                        ;;
+                r)
+                        if [[ $OPTARG =~ ^[0-9]+$ && $OPTARG -gt 0 ]]; then
+                                REPS=$OPTARG
+                        else
+                                usage
+                                exit 1
+                        fi
+                        ;;
 
-# Specify queue priority
-queue=normal
+                d)
+                        if [[ $OPTARG =~ ^[0-9]+$ && $OPTARG -gt 0 ]]; then
+                                ROUND=$OPTARG
+                        else
+                                usage
+                                exit 1
+                        fi
+                        ;;
+                w)
+                        if [[ $OPTARG =~ ^[0-9]{2}\:[0-9]{2}\:[0-9]{2}$ ]]; then
+                                WT=$OPTARG
+                        else
+                                usage
+                                exit 1
+                        fi
+                        ;;
+                h)
+                        usage
+                        exit 1
+                        ;;
+                \?)
+                        echo "Invalid option -$OPTARG" >&2
+                        usage
+                        exit 1
+                        ;;
+        esac
+done
 
-# Simulation name
-name=AMD
-
-# Total time in microseconds
-tottime=2
-
-# Number of different systems to run
-numsys=6
-
-# Number of replicates / conditions per system
-replicate=10
-
-# Names of the systems
-sysnames=(3TL8A 3TL8D 3TL8G 3TL8H 3UIM 3ULZ)
-
-# Set the base directory to run out of and make subdirectories in
-basedir="/u/sciteam/moffett/BAK1_aMD/"
-
-# Name the simulation directory
-simdir="AMD_runs"
-
-# Set the output directory
-outdir="/u/sciteam/moffett/scratch/output/BAK1_AMD/"
-
-# Set the portionof the name of your prmtop files following
-# the system name
-prmname=ATP
-
-##########################################################################################
-
-if [[ ($GPU=1) && ($MPI=0) ]]; then
-	type="xk"
-	ambertype=".cuda"
-elif [[ ($GPU=1) && ($MPI=1) ]]; then 
-	type="xk"
-	ambertype=".MPI.CUDA"
-elif [[ ($GPU=0) && ($MPI=1) ]]; then
-	type="xe"
-	ambertype=".MPI"
-elif [[ ($GPU=0) && ($MPI=0) ]]; then
-	type="xe"
-	ambertype=""
+if [[ $STRUC == 0 ]]; then
+        echo "-s requires an argument"
+        usage
+        exit 1
+elif [[ $OUTPUT == 0 ]]; then
+        echo "-o requires an argument"
+        usage
+        exit 1
+elif [[ $INPUT == 0 ]]; then
+        echo "-i requires an argument"
+        usage
+        exit 1
 fi
 
-runs=$(bc<<<"scale=2;(${tottime}*1000)/(40)")
+if [[ $TYPE == "xk" ]]; then
+        ppn=1
+        amber="cuda"
+else
+        ppn=32
+        amber="MPI"
+fi
 
-numpes=$(expr $procs * $node)
+totprocs=$(($ppn*$NNODE))
 
-cd ${basedir}
-mkdir ${simdir}
-mv *.prmtop ${simdir}/
-mv *.in ${simdir}/
+dir=$(pwd)
 
-for sys in $(seq 0 $(expr $numsys - 1)); do
-	cd ${basedir}${simdir}
-	mkdir ${sysnames[$sys]}/
-	mv ${sysnames[$sys]}*.prmtop ${sysnames[$sys]}/
-	mv ${sysnames[$sys]}.in ${sysnames[$sys]}/
-	cd ${sysnames[$sys]}/
-	for rep in $(seq 1 $replicate); do
-		for run in $(seq 1 $runs); do
-			if [ $run = 1 ]; then
-				crd=min
-				repmin=""
-			else
-				crd=$(expr $run - 1)
-				repmin="${rep}_"
-			fi
-			echo "#!/bin/bash" > ${name}_${run}_${sysnames[$sys]}_${rep}_${prmname}.pbs
-			echo "#PBS -l nodes=${node}:ppn=${procs}:${type}" >> ${name}_${run}_${sysnames[$sys]}_${rep}_${prmname}.pbs
-			echo "#PBS -l walltime=${time}" >> ${name}_${run}_${sysnames[$sys]}_${rep}_${prmname}.pbs
-			echo "#PBS -N ${sysnames[$sys]}_${name}_${rep}_${run}" >> ${name}_${run}_${sysnames[$sys]}_${rep}_${prmname}.pbs
-			echo "#PBS -e ${sysnames[$sys]}_${name}_${rep}_${run}.err" >> ${name}_${run}_${sysnames[$sys]}_${rep}_${prmname}.pbs
-			echo "#PBS -o ${sysnames[$sys]}_${name}_${rep}_${run}.out" >> ${name}_${run}_${sysnames[$sys]}_${rep}_${prmname}.pbs
-			echo "#PBS -q ${queue}" >> ${name}_${run}_${sysnames[$sys]}_${rep}_${prmname}.pbs
-			echo "#PBS -A ${project} >> ${name}_${run}_${sysnames[$sys]}_${rep}_${prmname}.pbs
-			echo "" >> ${name}_${run}_${sysnames[$sys]}_${rep}_${prmname}.pbs
-			echo "cd ${basedir}" >> ${name}_${run}_${sysnames[$sys]}_${rep}_${prmname}.pbs
-			echo "aprun -n ${numpes} -N ${procs} pmemd${ambertype} -O -p ${sysnames[$sys]}_${prmname}.prmtop -c ${outdir}${name}_${crd}_${sysnames[$sys]}_${repmin}${prmname}.rst -i ${sysnames[$sys]}.in -o ${outdir}${name}_${run}_${sysnames[$sys]}_${rep}_${prmname}.out -x ${outdir}${name}_${run}_${sysnames[$sys]}_${rep}_${prmname}.mdcrd -r ${outdir}${name}_${run}_${sysnames[$sys]}_${rep}_${prmname}.rst" >> ${name}_${run}_${sysnames[$sys]}_${rep}_${prmname}.pbs
-		done
-	done
-done
-
-cd ${basedir}${simdir}
+cd $dir
+mkdir $OUTPUT
+mkdir pbs_scripts
 mkdir submit_scripts
-cd submit_scripts
+cd pbs_scripts
 
-for run in $(seq 1 $runs); do
-	loop=0
-	echo "#!/bin/bash" > day_${run}_submit
-	for sys in $(seq 0 $(expr $numsys - 1)); do
-        	for rep in $(seq 1 $replicate); do
-			loop=$(expr $loop + 1)
-			echo "cd ${basedir}${simdir}/${sysnames[$sys]}" >> day_${run}_submit
-			echo 'JOB_'"$loop"'="qsub '"${name}_${run}_${sysnames[$sys]}_${rep}_${prmname}.pbs\"" >> day_${run}_submit
-		done
-	done
+count=0
+for pathway in $(ls ${STRUC}/*.[r,i][s,n][t,p]*); do
+        file=$(echo $pathway | rev | cut -d "/" -f1 | rev)
+        if [[ $file =~ ^.*inpcrd$ || $file =~ ^.*rst$  ]]; then
+                name="$(echo $file | rev | cut -d "." -f2- | rev)"
+                parm="${name}.prmtop"
+        else
+                echo "Error: only AMBER rst and inpcrd files are supported"
+                exit 1
+        fi
+        if [[ $SEP == True ]]; then
+                cd $OUTPUT
+                mkdir $OUTPUT/${name}
+                OUT="$OUTPUT/${name}"
+        else
+                OUT="$OUTPUT"
+        fi
+        for run in $(seq 1 $ROUND); do
+                for rep in $(seq 1 $REPS); do
+                        cd ${dir}/pbs_scripts
+                        echo "#!/bin/bash" > round_${run}_rep_${rep}_${name}.pbs
+                        echo "#PBS -l nodes=${NNODE}:ppn=${ppn}:${TYPE}" >> round_${run}_rep_${rep}_${name}.pbs
+                        echo "#PBS -l walltime=$WT" >> round_${run}_rep_${rep}_${name}.pbs
+                        echo "#PBS -N round_${run}_rep_${rep}_${name}" >> round_${run}_rep_${rep}_${name}.pbs
+                        echo "#PBS -e round_${run}_rep_${rep}_${name}.err" >> round_${run}_rep_${rep}_${name}.pbs
+                        echo "#PBS -o round_${run}_rep_${rep}_${name}.out" >> round_${run}_rep_${rep}_${name}.pbs
+                        echo "#PBS -q ${QUE}" >> round_${run}_rep_${rep}_${name}.pbs
+                        echo "#PBS -A ${ALLO}" >> round_${run}_rep_${rep}_${name}.pbs
+                        echo "" >> round_${run}_rep_${rep}_${name}.pbs
+                        echo "cd ${dir}/pbs_scripts" >> round_${run}_rep_${rep}_${name}.pbs
+                        echo "" >> round_${run}_rep_${rep}_${name}.pbs
+                        if [[ $TYPE == "xk" ]]; then
+                                echo 'export AMBERHOME=/projects/sciteam/jt3/amber14cuda' >> round_${run}_rep_${rep}_${name}.pbs
+                                echo 'export PATH=/projects/sciteam/jt3/amber14cuda/bin/:$PATH' >> round_${run}_rep_${rep}_${name}.pbs
+                        else
+                                echo 'export AMBERHOME=/projects/sciteam/jt3/amber14' >> round_${run}_rep_${rep}_${name}.pbs
+                                echo 'export PATH=/projects/sciteam/jt3/amber14/bin/:$PATH' >> round_${run}_rep_${rep}_${name}.pbs
+                        fi
+                        echo 'export CUDA_HOME=/opt/nvidia/cudatoolkit6.5/6.5.14-1.0502.9613.6.1' >> round_${run}_rep_${rep}_${name}.pbs
+                        echo 'export LD_LIBRARY_PATH=/opt/nvidia/cudatoolkit6.5/6.5.14-1.0502.9613.6.1/lib:/opt/nvidia/cudatoolkit6.5/6.5.14-1.0502.9613.6.1/lib64:$LD_LIBRARY_PATH' >> round_${run}_rep_${rep}_${name}.pbs
+                        echo "" >> round_${run}_rep_${rep}_${name}.pbs
+                        prev=$(($run - 1))
+                        if [[ $run = 1 ]]; then
+                                echo "aprun -n ${totprocs} -N ${ppn} pmemd.${amber} -O -p ${STRUC}/${parm} -c ${STRUC}/${file} -i ${INPUT} -o ${OUT}/round_${run}_rep_${rep}_${name}.out -x ${OUT}/round_${run}_rep_${rep}_${name}.mdcrd -r ${OUT}/round_${run}_rep_${rep}_${name}.rst" >> round_${run}_rep_${rep}_${name}.pbs                                                                                                                                                     1,8           Top
+			else
+                                echo "aprun -n ${totprocs} -N ${ppn} pmemd.${amber} -O -p ${STRUC}/${parm} -c ${OUT}/round_${prev}_rep_${rep}_${name}.rst -i ${INPUT} -o ${OUT}/round_${run}_rep_${rep}_${name}.out -x ${OUT}/round_${run}_rep_${rep}_${name}.mdcrd -r ${OUT}/round_${run}_rep_${rep}_${name}.rst" >> round_${run}_rep_${rep}_${name}.pbs
+                        fi
+                        cd ${dir}/submit_scripts
+                        if [[ $rep == 1 && $count == 0 ]]; then
+                                echo "#!/bin/bash" >> round_${run}_submit.sh
+                                echo "cd ${dir}/pbs_scripts" >> round_${run}_submit.sh
+                        fi
+                        echo "JOB""=\"qsub ""round_${run}_rep_${rep}_${name}.pbs\"" >> round_${run}_submit.sh
+                        echo '$JOB' >> round_${run}_submit.sh
+                done
+                cd ${dir}/submit_scripts
+                echo "cd ${dir}/submit_scripts" >> round_${run}_submit.sh
+                echo "echo \"ROUND ${run} SYSTEM ${name}\" >> job_submission.log" >> round_${run}_submit.sh
+                echo "cd ${dir}/pbs_scripts" >> round_${run}_submit.sh
+        done
+        count=$(($count + 1))
 done
+
 
